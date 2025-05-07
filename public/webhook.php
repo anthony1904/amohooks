@@ -6,94 +6,141 @@ require_once __DIR__ . '/../src/logger.php';
 use Dotenv\Dotenv;
 use App\AmoClient;
 
-// Загружаем переменные окружения
+// Загрузка переменных окружения
 $dotenv = Dotenv::createImmutable(__DIR__ . '/../');
 $dotenv->load();
 
 log_message('Сырой $_POST', $_POST);
 
-// Получаем данные
-$leads = $_POST['leads'] ?? null;
-$account = $_POST['account'] ?? null;
+$account  = $_POST['account'] ?? null;
+$leads    = $_POST['leads'] ?? [];
+$contacts = $_POST['contacts'] ?? [];
 
 log_message('Получен входящий вебхук', [
-    'account' => $account,
-    'leads' => $leads,
+    'account'  => $account,
+    'leads'    => $leads,
+    'contacts' => $contacts,
 ]);
 
-// Обработка событий
-if (isset($leads['add'])) {
-    log_message('Тип события', ['type' => 'create']);
-    processLeads($leads['add'], 'create');
-} elseif (isset($leads['update'])) {
-    log_message('Тип события', ['type' => 'update']);
-    processLeads($leads['update'], 'update');
+// Обработка сделок
+if (!empty($leads['add'])) {
+    log_message('Тип события', ['type' => 'lead_create']);
+    processEntities($leads['add'], 'leads', 'create');
+}
+if (!empty($leads['update'])) {
+    log_message('Тип события', ['type' => 'lead_update']);
+    processEntities($leads['update'], 'leads', 'update');
 }
 
-function processLeads(array $leads, string $eventType): void
+// Обработка контактов
+if (!empty($contacts['add'])) {
+    log_message('Тип события', ['type' => 'contact_create']);
+    processEntities($contacts['add'], 'contacts', 'create');
+}
+if (!empty($contacts['update'])) {
+    log_message('Тип события', ['type' => 'contact_update']);
+    processEntities($contacts['update'], 'contacts', 'update');
+}
+
+function processEntities(array $entities, string $entityType, string $eventType): void
 {
     $amo = new AmoClient();
 
-    foreach ($leads as $lead) {
-        $leadId = (int)$lead['id'];
-        $noteText = generateNoteText($lead, $eventType);
+    foreach ($entities as $entity) {
+        $entityId = (int)($entity['id'] ?? 0);
+        if (!$entityId) {
+            log_message('Нет ID сущности, пропускаем', $entity);
+            continue;
+        }
 
+        $noteText = generateNoteText($entity, $entityType, $eventType);
         if ($noteText) {
-            log_message('Добавляем примечание к сделке', [
-                'id' => $leadId,
-                'text' => $noteText
+            log_message('Добавляем примечание', [
+                'entity_type' => $entityType,
+                'entity_id'   => $entityId,
+                'text'        => $noteText,
             ]);
 
             try {
-                $amo->addNote($leadId, 'leads', $noteText);
-                log_message('Примечание добавлено');
+                $amo->addNote($entityId, $entityType, $noteText);
             } catch (\Throwable $e) {
                 log_message('Ошибка при добавлении примечания', [
-                    'error' => $e->getMessage()
+                    'error' => $e->getMessage(),
                 ]);
             }
         }
     }
 }
 
-function generateNoteText(array $lead, string $eventType): ?string
+function generateNoteText(array $entity, string $entityType, string $eventType): ?string
 {
-    $createdAt = date('Y-m-d H:i:s', (int)($lead['created_at'] ?? time()));
-    $updatedAt = date('Y-m-d H:i:s', (int)($lead['updated_at'] ?? time()));
-    $userId = $lead['responsible_user_id'] ?? null;
-    $userName = "Пользователь ID: {$userId}"; // Можно заменить на имя через API
+    $createdAt = !empty($entity['created_at']) ? date('Y-m-d H:i:s', (int)$entity['created_at']) : '-';
+    $updatedAt = !empty($entity['updated_at']) ? date('Y-m-d H:i:s', (int)$entity['updated_at']) : '-';
+    $userId = $entity['responsible_user_id'] ?? '-';
+    $userName = "Пользователь ID: {$userId}";
 
-    if ($eventType === 'create') {
-        return "Создана новая сделка:\n" .
-               "Название: " . ($lead['name'] ?? '-') . "\n" .
-               "Ответственный: {$userName}\n" .
-               "Время: {$createdAt}";
+    if ($entityType === 'leads') {
+        if ($eventType === 'create') {
+            return "Создана новая сделка:\n" .
+                "Название: " . ($entity['name'] ?? '-') . "\n" .
+                "Ответственный: {$userName}\n" .
+                "Время: {$createdAt}";
+        }
+
+        if ($eventType === 'update') {
+            $changedFields = [];
+            $fieldMap = [
+                'name' => 'Название',
+                'price' => 'Цена',
+                'status_id' => 'Статус ID',
+                'pipeline_id' => 'Воронка ID',
+                'responsible_user_id' => 'Ответственный ID',
+            ];
+
+            foreach ($fieldMap as $field => $label) {
+                if (isset($entity[$field])) {
+                    $changedFields[] = "{$label}: {$entity[$field]}";
+                }
+            }
+
+            return "Обновление сделки:\n" .
+                (!empty($changedFields) ? implode("\n", $changedFields) . "\n" : '') .
+                "Время: {$updatedAt}";
+        }
     }
 
-    if ($eventType === 'update') {
-        $text = "Обновление сделки:\n";
+    if ($entityType === 'contacts') {
+        $name = $entity['name'] ?? '-';
+        $company = $entity['company_name'] ?? '-';
+        $companyId = $entity['linked_company_id'] ?? '-';
+        $phone = '-';
 
-        $changedFields = [];
-        $fieldMap = [
-            'name' => 'Название',
-            'price' => 'Цена',
-            'status_id' => 'Статус ID',
-            'pipeline_id' => 'Воронка ID',
-            'responsible_user_id' => 'Ответственный ID'
-        ];
-
-        foreach ($fieldMap as $field => $label) {
-            if (isset($lead[$field])) {
-                $changedFields[] = "{$label}: {$lead[$field]}";
+        if (!empty($entity['custom_fields'])) {
+            foreach ($entity['custom_fields'] as $field) {
+                if (isset($field['code']) && $field['code'] === 'PHONE') {
+                    $phone = $field['values'][0]['value'] ?? '-';
+                    break;
+                }
             }
         }
 
-        if (!empty($changedFields)) {
-            $text .= implode("\n", $changedFields) . "\n";
+        if ($eventType === 'create') {
+            return "Создан новый контакт:\n" .
+                "Имя: {$name}\n" .
+                "Компания: {$company} (ID: {$companyId})\n" .
+                "Телефон: {$phone}\n" .
+                "Ответственный: {$userName}\n" .
+                "Время создания: {$createdAt}";
         }
 
-        $text .= "Время: {$updatedAt}";
-        return $text;
+        if ($eventType === 'update') {
+            return "Обновление контакта:\n" .
+                "Имя: {$name}\n" .
+                "Компания: {$company} (ID: {$companyId})\n" .
+                "Телефон: {$phone}\n" .
+                "Ответственный: {$userName}\n" .
+                "Время обновления: {$updatedAt}";
+        }
     }
 
     return null;
